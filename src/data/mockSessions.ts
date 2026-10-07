@@ -1,5 +1,6 @@
-import type { CurveTemplate, FiringPoint, KilnSession } from '../types/firing'
+import type { CurveTemplate, FiringLedger, FiringPoint, KilnSession, RawSample } from '../types/firing'
 import { createActualSamples } from '../utils/curve'
+import { buildSegment } from '../utils/ledger'
 
 function points(values: Array<[number, number]>, prefix: string): FiringPoint[] {
   return values.map(([timeMin, tempC], index) => ({
@@ -101,6 +102,11 @@ const sessionDefinitions: Array<{
   status: KilnSession['status']
   pointValues: Array<[number, number]>
   offset: number
+  /** 停电断网缺口（分钟），仅演示窑次使用 */
+  gap?: { from: number; to: number }
+  /** 班组长手工校订的演示点（经过时间，修正温度） */
+  correction?: { timeMin: number; tempC: number; reason: string }
+  legacy?: boolean
 }> = [
   {
     id: 'kiln-session-20261002',
@@ -121,6 +127,9 @@ const sessionDefinitions: Array<{
       [700, 85],
     ],
     offset: 3,
+    // 212–247 分钟停电断网，记录仪各导出一段
+    gap: { from: 212, to: 247 },
+    correction: { timeMin: 180, tempC: 792, reason: '热电偶读数跳变，按邻段趋势校正' },
   },
   {
     id: 'kiln-session-20260928',
@@ -162,12 +171,81 @@ const sessionDefinitions: Array<{
       [560, 80],
     ],
     offset: 6,
+    // 该窑次演示旧版整份采样升级为一段记录
+    legacy: true,
   },
 ]
+
+/** 把一条连续采样按停电区间拆成两段，模拟记录仪断电断网后各自导出的 CSV */
+function splitSamplesByGap(samples: RawSample[], gap: { from: number; to: number }, seed: number) {
+  const before: RawSample[] = []
+  const after: RawSample[] = []
+  samples.forEach((sample) => {
+    if (sample.timeMin <= gap.from) {
+      before.push({ ...sample, id: `seg-a-${seed}-${sample.timeMin}` })
+    } else if (sample.timeMin >= gap.to) {
+      after.push({ ...sample, id: `seg-b-${seed}-${sample.timeMin}` })
+    }
+  })
+  return [before, after]
+}
+
+function ledgerFor(definition: (typeof sessionDefinitions)[number], allSamples: RawSample[]): FiringLedger {
+  if (definition.legacy) {
+    return {
+      migratedFromLegacy: true,
+      segments: [
+        {
+          id: `segment-legacy-${definition.id}`,
+          fileName: '升级前整份采样.csv',
+          sourceLabel: '旧数据迁移',
+          importedAt: '2026-09-20T15:00:00.000Z',
+          firstAtMin: allSamples[0].timeMin,
+          lastAtMin: allSamples.at(-1)!.timeMin,
+          sampleCount: allSamples.length,
+          rawSamples: allSamples,
+        },
+      ],
+      corrections: [],
+    }
+  }
+
+  let segmentSamples: RawSample[][]
+  if (definition.gap) {
+    segmentSamples = splitSamplesByGap(allSamples, definition.gap, definition.id.length)
+  } else {
+    const cut = Math.floor(allSamples.length * 0.55)
+    segmentSamples = [
+      allSamples.slice(0, cut).map((sample) => ({ ...sample, id: `seg-a-${sample.id}` })),
+      allSamples.slice(cut).map((sample) => ({ ...sample, id: `seg-b-${sample.id}` })),
+    ]
+  }
+
+  const first = buildSegment(segmentSamples[0], '记录仪-第1段.csv', '记录仪导出（停电前）')
+  const second = buildSegment(segmentSamples[1], '记录仪-第2段.csv', '记录仪导出（复电后）')
+  const ledger: FiringLedger = { segments: [first!, second!].filter(Boolean), corrections: [] }
+  if (first) {
+    first.importedAt = '2026-10-02T10:00:00.000Z'
+  }
+  if (second) {
+    second.importedAt = '2026-10-02T16:00:00.000Z'
+  }
+  if (definition.correction) {
+    ledger.corrections.push({
+      id: `correction-${definition.id}`,
+      timeMin: definition.correction.timeMin,
+      tempC: definition.correction.tempC,
+      reason: definition.correction.reason,
+      updatedAt: '2026-10-03T08:30:00.000Z',
+    })
+  }
+  return ledger
+}
 
 export function createMockSessions(): KilnSession[] {
   return sessionDefinitions.map((definition, index) => {
     const sessionPoints = points(definition.pointValues, definition.id)
+    const allSamples = createActualSamples(sessionPoints, index + 3)
     return {
       id: definition.id,
       name: definition.name,
@@ -178,7 +256,7 @@ export function createMockSessions(): KilnSession[] {
       status: definition.status,
       timeOffsetMin: definition.offset,
       points: sessionPoints,
-      actualSamples: createActualSamples(sessionPoints, index + 3),
+      ledger: ledgerFor(definition, allSamples),
     }
   })
 }

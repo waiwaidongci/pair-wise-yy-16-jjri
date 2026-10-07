@@ -24,7 +24,9 @@ defineProps<{
         class="risk-item"
         :class="`risk-item--${issue.severity}`"
       >
-        <span class="risk-item__index">{{ issue.stageIndex + 1 }}</span>
+        <span class="risk-item__index">
+          {{ issue.stageIndex >= 0 ? issue.stageIndex + 1 : '账' }}
+        </span>
         <div>
           <strong>{{ issue.title }}</strong>
           <p>{{ issue.message }}</p>

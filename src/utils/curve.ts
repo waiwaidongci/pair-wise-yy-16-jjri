@@ -2,11 +2,14 @@ import type {
   CurveTemplate,
   DeviationSummary,
   FiringPoint,
-  FiringSample,
   FiringStage,
   KilnSession,
+  LedgerMerge,
+  RawSample,
   RiskIssue,
+  SamplePoint,
 } from '../types/firing'
+import { mergeLedger } from './ledger'
 
 export function sortPoints(points: FiringPoint[]) {
   return [...points].sort((a, b) => a.timeMin - b.timeMin)
@@ -102,6 +105,64 @@ export function validateCurve(session: KilnSession): RiskIssue[] {
   return issues
 }
 
+/** 基于合并后的实测账检查风险；时间偏移已体现在调用方传入的采样上 */
+function assessActualRisks(session: KilnSession, merged: LedgerMerge): RiskIssue[] {
+  const issues: RiskIssue[] = []
+  const heatLimit = CLAY_HEAT_LIMITS[session.clay] ?? 5
+  const coolLimit = GLAZE_RULES[session.glaze]?.coolLimit ?? 2.5
+  const samples = merged.samples
+
+  // 缺口内不插值，逐段计算相邻实测点的升降温速率
+  for (let index = 1; index < samples.length; index += 1) {
+    const previous = samples[index - 1]
+    const current = samples[index]
+    const deltaMin = current.timeMin - previous.timeMin
+    if (deltaMin < 1) continue
+    if (merged.gaps.some((gap) => previous.timeMin >= gap.startMin && current.timeMin <= gap.endMin && gap.missingDurationMin > 0)) {
+      continue
+    }
+    const rate = (current.tempC - previous.tempC) / deltaMin
+    if (rate > heatLimit) {
+      issues.push({
+        id: `actual-heat-${current.timeMin}`,
+        stageIndex: -1,
+        severity: 'warning',
+        title: '实测升温偏快',
+        message: `${(current.timeMin / 60).toFixed(2)}h 处实测升温 ${rate.toFixed(2)} ℃/min，超过 ${session.clay}建议的 ${heatLimit.toFixed(1)} ℃/min，请关注该段胎体应力。`,
+        metric: `${rate.toFixed(2)} / ${heatLimit.toFixed(1)} ℃/min`,
+      })
+    }
+    if (Math.abs(rate) > coolLimit && rate < 0) {
+      issues.push({
+        id: `actual-cool-${current.timeMin}`,
+        stageIndex: -1,
+        severity: 'warning',
+        title: '实测降温偏快',
+        message: `${(current.timeMin / 60).toFixed(2)}h 处实测降温 ${Math.abs(rate).toFixed(2)} ℃/min，快于 ${session.glaze}建议的 ${coolLimit.toFixed(1)} ℃/min。`,
+        metric: `${Math.abs(rate).toFixed(2)} / ${coolLimit.toFixed(1)} ℃/min`,
+      })
+    }
+  }
+
+  merged.gaps.forEach((gap, index) => {
+    issues.push({
+      id: `gap-${gap.startMin}-${gap.endMin}-${index}`,
+      stageIndex: -1,
+      severity: 'warning',
+      title: '记录仪缺口已单独保留',
+      message: `${(gap.startMin / 60).toFixed(2)}h–${(gap.endMin / 60).toFixed(2)}h 停电断网约 ${gap.missingDurationMin.toFixed(0)} 分钟（${gap.lastObservedC.toFixed(0)}℃→${gap.nextObservedC.toFixed(0)}℃），该段未插值补齐，偏差统计不含缺口内部。`,
+      metric: `${gap.missingDurationMin.toFixed(0)} min`,
+    })
+  })
+
+  return issues
+}
+
+/** 风险结果 = 目标曲线规则 + 实测账规则，共用同一份账，随签名统一失效重算 */
+export function assessSessionRisks(session: KilnSession, merged: LedgerMerge): RiskIssue[] {
+  return [...validateCurve(session), ...assessActualRisks(session, merged)]
+}
+
 export function interpolateTemperature(points: FiringPoint[], timeMin: number) {
   const sorted = sortPoints(points)
   if (!sorted.length) return 0
@@ -121,7 +182,7 @@ export function interpolateTemperature(points: FiringPoint[], timeMin: number) {
 
 export function calculateDeviation(
   points: FiringPoint[],
-  samples: FiringSample[],
+  samples: ReadonlyArray<SamplePoint>,
   offsetMin: number,
 ): DeviationSummary {
   if (!samples.length) {
@@ -153,9 +214,9 @@ export function calculateDeviation(
   }
 }
 
-export function createActualSamples(points: FiringPoint[], seed = 1): FiringSample[] {
+export function createActualSamples(points: FiringPoint[], seed = 1): RawSample[] {
   const end = Math.max(...points.map((point) => point.timeMin))
-  const samples: FiringSample[] = []
+  const samples: RawSample[] = []
   for (let time = 0; time <= end; time += 5) {
     const target = interpolateTemperature(points, time)
     const shift = Math.sin((time + seed * 7) / 35) * 12
@@ -184,7 +245,7 @@ export function templateToPoints(template: CurveTemplate, targetSessionId: strin
 export function sessionDomain(sessions: KilnSession[]) {
   const points = sessions.flatMap((session) => session.points)
   const samples = sessions.flatMap((session) =>
-    session.actualSamples.map((sample) => ({
+    mergeLedger(session.ledger).samples.map((sample) => ({
       ...sample,
       timeMin: sample.timeMin + session.timeOffsetMin,
     })),

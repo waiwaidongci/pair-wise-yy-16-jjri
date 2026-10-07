@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import type { FiringPoint, FiringSample, KilnSession } from '../types/firing'
+import type { FiringPoint, KilnSession, LedgerMerge, MergedSample } from '../types/firing'
 import { sessionDomain, sortPoints } from '../utils/curve'
+import { mergeLedger } from '../utils/ledger'
 
 const props = withDefaults(
   defineProps<{
@@ -10,11 +11,14 @@ const props = withDefaults(
     selectedPointId?: string | null
     interactive?: boolean
     showActual?: boolean
+    /** 曲线/偏差/风险/对比共用同一份合并结果；缺省时按账即时合并 */
+    actualProvider?: (session: KilnSession) => LedgerMerge
   }>(),
   {
     selectedPointId: null,
     interactive: true,
     showActual: true,
+    actualProvider: undefined,
   },
 )
 
@@ -37,6 +41,49 @@ const activeSession = computed(
   () => props.sessions.find((session) => session.id === props.activeSessionId) ?? props.sessions[0],
 )
 
+function mergedOf(session: KilnSession): LedgerMerge {
+  return props.actualProvider ? props.actualProvider(session) : mergeLedger(session.ledger)
+}
+
+/**
+ * 应用时间偏移后的实测序列：
+ * - 缺口处断线，绝不跨缺口插值连线；
+ * - 缺口内的人工校订（manual-only）只作标记，不参与折线；
+ * - 校订点单独收集用于圆点/菱形标记。
+ */
+const actualSeries = computed(() =>
+  props.sessions.map((session) => {
+    const merged = mergedOf(session)
+    const offset = session.timeOffsetMin
+    const lineSamples = merged.samples
+      .filter((sample) => sample.source !== 'manual-only')
+      .map((sample) => ({ ...sample, plotTime: sample.timeMin + offset }))
+    const withinGap = (timeMin: number) =>
+      merged.gaps.some((gap) => timeMin > gap.startMin && timeMin < gap.endMin && gap.missingDurationMin > 0)
+    const crossesGap = (a: { timeMin: number }, b: { timeMin: number }) =>
+      merged.gaps.some((gap) => a.timeMin <= gap.startMin + 0.001 && b.timeMin >= gap.endMin - 0.001)
+
+    const paths: string[] = []
+    let buffer: typeof lineSamples = []
+    lineSamples.forEach((sample, index) => {
+      if (index > 0 && crossesGap(lineSamples[index - 1], sample)) {
+        paths.push(toPath(buffer))
+        buffer = []
+      }
+      buffer.push(sample)
+    })
+    if (buffer.length) paths.push(toPath(buffer))
+
+    const corrections = merged.samples
+      .filter((sample) => sample.corrected && !withinGap(sample.timeMin) && sample.source !== 'manual-only')
+      .map((sample) => ({ ...sample, plotTime: sample.timeMin + offset }))
+    const gapCorrections = merged.samples
+      .filter((sample) => sample.source === 'manual-only' || (sample.corrected && withinGap(sample.timeMin)))
+      .map((sample) => ({ ...sample, plotTime: sample.timeMin + offset }))
+    return { session, paths, corrections, gapCorrections }
+  }),
+)
+
 function xScale(timeMin: number) {
   return padding.left + (timeMin / domain.value.maxTime) * plotWidth
 }
@@ -51,9 +98,9 @@ function path(points: FiringPoint[]) {
     .join(' ')
 }
 
-function samplePath(samples: FiringSample[]) {
+function toPath(samples: Array<MergedSample & { plotTime: number }>) {
   return samples
-    .map((sample, index) => `${index ? 'L' : 'M'} ${xScale(sample.timeMin).toFixed(2)} ${yScale(sample.tempC).toFixed(2)}`)
+    .map((sample, index) => `${index ? 'L' : 'M'} ${xScale(sample.plotTime).toFixed(2)} ${yScale(sample.tempC).toFixed(2)}`)
     .join(' ')
 }
 
@@ -139,6 +186,47 @@ function sessionColor(index: number) {
         <text :x="width - padding.right" :y="height - 15" text-anchor="end">烧成经过时间（小时）</text>
       </g>
 
+      <g v-for="(series, index) in actualSeries" :key="`actual-${series.session.id}`" class="curve-series">
+        <template v-if="showActual">
+          <path
+            v-for="(d, pathIndex) in series.paths"
+            :key="pathIndex"
+            :d="d"
+            fill="none"
+            :stroke="series.session.id === activeSessionId ? '#2e6f76' : sessionColor(index + 1)"
+            :stroke-width="series.session.id === activeSessionId ? 2.2 : 1.3"
+            :opacity="series.session.id === activeSessionId ? .9 : .25"
+            class="actual-curve"
+          />
+          <!-- 人工校订点：覆盖段上的为圆点，缺口内单独保留的为菱形 -->
+          <template v-if="series.session.id === activeSessionId">
+            <circle
+              v-for="sample in series.corrections"
+              :key="`corr-${sample.correctionId}`"
+              :cx="xScale(sample.plotTime)"
+              :cy="yScale(sample.tempC)"
+              r="4.5"
+              class="correction-mark"
+            >
+              <title>人工校订 {{ (sample.timeMin / 60).toFixed(2) }}h：{{ sample.rawTempC?.toFixed(0) }}℃ → {{ sample.tempC.toFixed(0) }}℃</title>
+            </circle>
+            <rect
+              v-for="sample in series.gapCorrections"
+              :key="`gapcorr-${sample.correctionId}`"
+              :x="xScale(sample.plotTime) - 4.5"
+              :y="yScale(sample.tempC) - 4.5"
+              width="9"
+              height="9"
+              transform="rotate(45)"
+              :transform-origin="`${xScale(sample.plotTime)} ${yScale(sample.tempC)}`"
+              class="correction-mark correction-mark--gap"
+            >
+              <title>缺口内人工校订 {{ (sample.timeMin / 60).toFixed(2) }}h：{{ sample.tempC.toFixed(0) }}℃（未插值补齐）</title>
+            </rect>
+          </template>
+        </template>
+      </g>
+
       <g v-for="(session, index) in sessions" :key="session.id" class="curve-series">
         <path
           v-if="session.id !== activeSessionId"
@@ -149,15 +237,6 @@ function sessionColor(index: number) {
           stroke-dasharray="7 5"
           opacity=".55"
           class="overlay-curve"
-        />
-        <path
-          v-if="showActual && session.actualSamples.length"
-          :d="samplePath(session.actualSamples)"
-          fill="none"
-          :stroke="session.id === activeSessionId ? '#2e6f76' : sessionColor(index + 1)"
-          :stroke-width="session.id === activeSessionId ? 2.2 : 1.3"
-          :opacity="session.id === activeSessionId ? .9 : .25"
-          class="actual-curve"
         />
         <path
           v-if="session.id === activeSessionId"
@@ -196,8 +275,9 @@ function sessionColor(index: number) {
     <div class="chart-legend">
       <span><i class="legend-target" />目标曲线</span>
       <span><i class="legend-actual" />实际记录</span>
+      <span><i class="legend-correction" />人工校订</span>
       <span><i class="legend-overlay" />叠加窑次</span>
-      <span class="chart-hint">拖动圆点调整温度与到达时间</span>
+      <span class="chart-hint">虚线缺口为停电断网，未插值补齐；拖动圆点调整温度与到达时间</span>
     </div>
   </div>
 </template>
@@ -210,6 +290,8 @@ svg { display: block; width: 100%; height: auto; overflow: visible; touch-action
 .axis-labels text { font-weight: 600; }
 .target-curve { filter: drop-shadow(0 2px 3px rgba(182, 83, 47, .18)); }
 .actual-curve { stroke-dasharray: 5 4; }
+.correction-mark { fill: #e08a2b; stroke: #fff8f1; stroke-width: 1.6; }
+.correction-mark--gap { fill: #c0452f; }
 .curve-point circle {
   fill: #fff8f1;
   stroke: #aa4e2d;
@@ -225,6 +307,7 @@ svg { display: block; width: 100%; height: auto; overflow: visible; touch-action
 .chart-legend i { display: inline-block; width: 24px; height: 3px; border-radius: 2px; }
 .legend-target { background: #b6532f; }
 .legend-actual { background: repeating-linear-gradient(90deg, #2e6f76 0 6px, transparent 6px 10px); }
+.legend-correction { width: 10px; height: 10px; border-radius: 50%; background: #e08a2b; }
 .legend-overlay { background: #447f8a; opacity: .5; }
 .chart-hint { margin-left: auto; }
 </style>

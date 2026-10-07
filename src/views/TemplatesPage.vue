@@ -6,6 +6,7 @@ import InputText from 'primevue/inputtext'
 import Tag from 'primevue/tag'
 import { useFiringStore } from '../stores/firingStore'
 import CurveChart from '../components/CurveChart.vue'
+import { emptyLedger } from '../utils/ledger'
 import type { CurveTemplate, KilnSession } from '../types/firing'
 
 const store = useFiringStore()
@@ -35,7 +36,7 @@ const previewSession = computed<KilnSession>(() => {
     status: 'draft',
     timeOffsetMin: 0,
     points: template.points.map((point, index) => ({ ...point, id: `preview-point-${index}` })),
-    actualSamples: [],
+    ledger: emptyLedger(),
   }
 })
 

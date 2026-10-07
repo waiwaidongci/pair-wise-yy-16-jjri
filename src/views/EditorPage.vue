@@ -6,24 +6,22 @@ import Select from 'primevue/select'
 import Dialog from 'primevue/dialog'
 import InputText from 'primevue/inputtext'
 import { useFiringStore } from '../stores/firingStore'
+import type { KilnSession, LedgerMerge } from '../types/firing'
 import CurveChart from '../components/CurveChart.vue'
 import StagePanel from '../components/StagePanel.vue'
 import RiskSummary from '../components/RiskSummary.vue'
 import DeviationPanel from '../components/DeviationPanel.vue'
-import { buildStages, calculateDeviation } from '../utils/curve'
+import { buildStages } from '../utils/curve'
 
 const store = useFiringStore()
-const { activeSession, selectedPointId, selectedStageIndex, validationIssues, canUndo, canRedo } = storeToRefs(store)
+const { activeSession, selectedPointId, selectedStageIndex, canUndo, canRedo } = storeToRefs(store)
 const templateOpen = ref(false)
 const templateName = ref('')
 const stages = computed(() => buildStages(activeSession.value.points))
-const deviation = computed(() =>
-  calculateDeviation(
-    activeSession.value.points,
-    activeSession.value.actualSamples,
-    activeSession.value.timeOffsetMin,
-  ),
-)
+// 偏差、风险与图表共用同一份合并账结果；曲线或偏移一变即失效重算
+const derived = computed(() => store.getDerived(activeSession.value))
+const deviation = computed(() => derived.value.deviation)
+const provideMerged = (session: KilnSession): LedgerMerge => store.getDerived(session).merged
 const sessionOptions = computed(() =>
   store.sessions.map((session) => ({ label: session.name, value: session.id })),
 )
@@ -87,6 +85,7 @@ function saveTemplate() {
           :sessions="[activeSession]"
           :active-session-id="activeSession.id"
           :selected-point-id="selectedPointId"
+          :actual-provider="provideMerged"
           @select-point="selectedPointId = $event"
           @update-point="(id, time, temp) => store.updatePoint(id, time, temp, false)"
           @begin-drag="store.beginDrag"
@@ -97,7 +96,7 @@ function saveTemplate() {
       <aside class="side-panel">
         <StagePanel
           :stages="stages"
-          :issues="validationIssues"
+          :issues="derived.risks"
           :selected-index="selectedStageIndex"
           @select="selectedStageIndex = $event"
           @update="updateSelectedStage"
@@ -111,11 +110,15 @@ function saveTemplate() {
         <DeviationPanel
           :summary="deviation"
           :offset-min="activeSession.timeOffsetMin"
+          :gap-count="derived.merged.gaps.length"
+          :corrected-count="derived.merged.samples.filter((s) => s.corrected).length"
+          :signature="derived.signature"
+          :recomputed-at="derived.recomputedAt"
           @update-offset="store.setTimeOffset"
         />
       </article>
       <article class="detail-card">
-        <RiskSummary :issues="validationIssues" />
+        <RiskSummary :issues="derived.risks" />
       </article>
     </section>
 
