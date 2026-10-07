@@ -6,15 +6,16 @@ import Checkbox from 'primevue/checkbox'
 import Tag from 'primevue/tag'
 import { useFiringStore } from '../stores/firingStore'
 import CurveChart from '../components/CurveChart.vue'
-import { calculateDeviation } from '../utils/curve'
 
 const store = useFiringStore()
-const { visibleSessions, activeSession } = storeToRefs(store)
+const { visibleSessions, activeSession, accountBySession, activeAccount } = storeToRefs(store)
 const comparisonRows = computed(() =>
   visibleSessions.value.map((session) => {
-    const deviation = calculateDeviation(session.points, session.actualSamples, session.timeOffsetMin)
+    const account = accountBySession.value.get(session.id)
+    const deviation = account?.deviation ?? activeAccount.value.deviation
+    const gaps = account?.gaps ?? []
     const peak = Math.max(...session.points.map((point) => point.tempC))
-    return { session, deviation, peak }
+    return { session, deviation, gaps, peak }
   }),
 )
 </script>
@@ -37,6 +38,7 @@ const comparisonRows = computed(() =>
           :active-session-id="activeSession.id"
           :interactive="false"
           :show-actual="true"
+          :gaps="activeAccount.gaps"
         />
       </article>
       <aside class="compare-side">
@@ -71,7 +73,7 @@ const comparisonRows = computed(() =>
       </div>
       <div class="comparison-table">
         <div class="comparison-row comparison-row--header">
-          <span>窑次</span><span>泥料 / 釉料</span><span>峰值</span><span>平均偏差</span><span>最大偏差</span><span>状态</span>
+          <span>窑次</span><span>泥料 / 釉料</span><span>峰值</span><span>平均偏差</span><span>最大偏差</span><span>缺口</span><span>状态</span>
         </div>
         <div v-for="row in comparisonRows" :key="row.session.id" class="comparison-row">
           <strong>{{ row.session.name }}</strong>
@@ -79,6 +81,7 @@ const comparisonRows = computed(() =>
           <span>{{ row.peak }} ℃</span>
           <span>{{ row.deviation.meanAbs.toFixed(1) }} ℃</span>
           <span>{{ row.deviation.maxAbs.toFixed(1) }} ℃</span>
+          <span>{{ row.gaps.length }} 处</span>
           <Tag :value="row.session.status === 'completed' ? '已完成' : row.session.status === 'review' ? '待复核' : '草稿'" :severity="row.session.status === 'completed' ? 'success' : row.session.status === 'review' ? 'warn' : 'secondary'" />
         </div>
       </div>

@@ -143,7 +143,7 @@ button, input { font: inherit; }
 .session-toggle strong { color: #554037; font-size: 11px; }
 .session-toggle small { margin-top: 3px; color: #9b897f; font-size: 9px; }
 .comparison-table { padding: 8px 14px 15px; }
-.comparison-row { display: grid; align-items: center; min-height: 45px; border-bottom: 1px solid #f0e9e4; color: #755f55; font-size: 11px; grid-template-columns: 1.4fr 1.2fr .7fr .8fr .8fr .7fr; }
+.comparison-row { display: grid; align-items: center; min-height: 45px; border-bottom: 1px solid #f0e9e4; color: #755f55; font-size: 11px; grid-template-columns: 1.4fr 1.2fr .7fr .8fr .8fr .6fr .7fr; }
 .comparison-row--header { min-height: 38px; color: #9b887e; font-size: 9px; font-weight: 700; }
 .comparison-row strong { color: #50382e; }
 

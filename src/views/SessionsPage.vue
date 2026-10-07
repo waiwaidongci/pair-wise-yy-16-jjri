@@ -1,34 +1,14 @@
 <script setup lang="ts">
-import { ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import Button from 'primevue/button'
 import InputText from 'primevue/inputtext'
 import Select from 'primevue/select'
 import Tag from 'primevue/tag'
 import { useFiringStore } from '../stores/firingStore'
-import { parseTemperatureCsv } from '../utils/csv'
+import LedgerPanel from '../components/LedgerPanel.vue'
 
 const store = useFiringStore()
 const { activeSession } = storeToRefs(store)
-const fileInput = ref<HTMLInputElement>()
-const importMessage = ref('')
-
-function openFile() {
-  fileInput.value?.click()
-}
-
-async function importCsv(event: Event) {
-  const file = (event.target as HTMLInputElement).files?.[0]
-  if (!file) return
-  const samples = parseTemperatureCsv(await file.text())
-  if (!samples.length) {
-    importMessage.value = '未解析到有效记录，请确认 CSV 包含 time,temp 两列。'
-  } else {
-    store.importSamples(samples)
-    importMessage.value = `已导入 ${samples.length} 个温度采样点。`
-  }
-  ;(event.target as HTMLInputElement).value = ''
-}
 </script>
 
 <template>
@@ -36,8 +16,8 @@ async function importCsv(event: Event) {
     <section class="page-heading">
       <div>
         <span class="eyebrow">窑次档案</span>
-        <h2>窑次与记录仪数据</h2>
-        <p>维护泥料、釉料和烧成参数，导入温度记录后自动进入待复核状态。</p>
+        <h2>窑次与烧成账</h2>
+        <p>维护泥料、釉料和烧成参数；导入分段记录后按时间与来源合并，人工校订优先，缺口单独保留。</p>
       </div>
       <Button label="新建窑次" icon="pi pi-plus" @click="store.addSession" />
     </section>
@@ -69,7 +49,7 @@ async function importCsv(event: Event) {
 
       <article class="session-detail">
         <div class="panel-title panel-title--row">
-          <div><strong>{{ activeSession.name }}</strong><span>窑次信息与记录仪导入</span></div>
+          <div><strong>{{ activeSession.name }}</strong><span>窑次信息与分段记录</span></div>
           <Button icon="pi pi-trash" label="删除" severity="danger" text :disabled="store.sessions.length <= 1" @click="store.removeSession(activeSession.id)" />
         </div>
         <div class="form-grid">
@@ -92,25 +72,7 @@ async function importCsv(event: Event) {
           <label class="form-span"><span>烧成时间</span><InputText :model-value="activeSession.firedAt" @update:model-value="store.updateSessionMeta({ firedAt: $event })" /></label>
         </div>
 
-        <div class="import-box">
-          <input ref="fileInput" class="hidden-input" type="file" accept=".csv,text/csv" @change="importCsv" />
-          <div class="import-icon"><i class="pi pi-file-import" /></div>
-          <div>
-            <strong>导入记录仪 CSV</strong>
-            <span>支持 time,temp 或 时间,温度 表头；时间单位可为分钟或 hh:mm:ss。</span>
-          </div>
-          <Button label="选择文件" icon="pi pi-upload" outlined @click="openFile" />
-          <Button v-if="activeSession.actualSamples.length" label="清除实测" severity="danger" text @click="store.clearActualSamples" />
-        </div>
-        <p v-if="importMessage" class="import-message">{{ importMessage }}</p>
-
-        <div class="sample-summary">
-          <strong>当前实测数据</strong>
-          <span v-if="activeSession.actualSamples.length">
-            {{ activeSession.actualSamples.length }} 点 · 起始 {{ activeSession.actualSamples[0].tempC.toFixed(0) }} ℃ · 结束 {{ activeSession.actualSamples.at(-1)?.tempC.toFixed(0) }} ℃
-          </span>
-          <span v-else>尚未导入实测温度</span>
-        </div>
+        <LedgerPanel :session="activeSession" />
       </article>
     </section>
   </div>

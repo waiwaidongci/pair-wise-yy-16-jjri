@@ -1,8 +1,24 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { createMockSessions, MOCK_TEMPLATES } from '../data/mockSessions'
-import type { CurveTemplate, FiringPoint, FiringSample, KilnSession } from '../types/firing'
-import { cloneSession, templateToPoints, validateCurve } from '../utils/curve'
+import type {
+  CorrectionPoint,
+  CurveTemplate,
+  FiringPoint,
+  FiringSample,
+  KilnSession,
+  SegmentRecord,
+  SessionAccount,
+} from '../types/firing'
+import { cloneSession, templateToPoints } from '../utils/curve'
+import {
+  computeSessionAccount,
+  createCorrection,
+  createSegmentFromImport,
+  migrateSession,
+  recomputeSessionDerived,
+} from '../utils/ledger'
+import { parseTemperatureCsv } from '../utils/csv'
 
 const STORAGE_KEY = 'pair-wise-yy-16-firing-studio'
 
@@ -22,7 +38,9 @@ function loadState() {
 
 export const useFiringStore = defineStore('firing-studio', () => {
   const persisted = loadState()
-  const sessions = ref<KilnSession[]>(persisted?.sessions?.length ? persisted.sessions : createMockSessions())
+  // 旧数据升级：把整份采样迁成一段记录；归并前后都能看见来源与缺口
+  const loadedSessions = (persisted?.sessions?.length ? persisted.sessions : createMockSessions()).map(migrateSession)
+  const sessions = ref<KilnSession[]>(loadedSessions)
   const templates = ref<CurveTemplate[]>(persisted?.templates?.length ? persisted.templates : MOCK_TEMPLATES)
   const activeSessionId = ref(
     persisted?.activeSessionId && sessions.value.some((item) => item.id === persisted.activeSessionId)
@@ -38,17 +56,33 @@ export const useFiringStore = defineStore('firing-studio', () => {
   const undoStack = ref<Array<{ sessions: KilnSession[]; activeSessionId: string }>>([])
   const redoStack = ref<Array<{ sessions: KilnSession[]; activeSessionId: string }>>([])
   const dragHistoryPending = ref(false)
+  /** 导入失败的文件，保留原账并可重试 */
+  const lastFailedImport = ref<{ filename: string; content: string } | null>(null)
 
   const activeSession = computed(
     () => sessions.value.find((session) => session.id === activeSessionId.value) ?? sessions.value[0],
   )
-  const validationIssues = computed(() => validateCurve(activeSession.value))
   const visibleSessions = computed(() => {
     const ids = new Set([activeSessionId.value, ...overlaySessionIds.value])
     return sessions.value.filter((session) => ids.has(session.id))
   })
   const canUndo = computed(() => undoStack.value.length > 0)
   const canRedo = computed(() => redoStack.value.length > 0)
+
+  /**
+   * 同一份烧成账：窑次 + 分段 + 校订 + 缺口 + 偏差/风险结果。
+   * 偏差、风险、对比都从这里取，目标曲线或时间偏移变化时立即失效重算。
+   */
+  const accountBySession = computed(() => {
+    const map = new Map<string, SessionAccount>()
+    for (const session of sessions.value) {
+      map.set(session.id, computeSessionAccount(session))
+    }
+    return map
+  })
+  const activeAccount = computed(
+    () => accountBySession.value.get(activeSessionId.value) ?? computeSessionAccount(activeSession.value),
+  )
 
   function persist() {
     localStorage.setItem(
@@ -77,6 +111,7 @@ export const useFiringStore = defineStore('firing-studio', () => {
 
   function restore(snapshotState: { sessions: KilnSession[]; activeSessionId: string }) {
     sessions.value = snapshotState.sessions.map(cloneSession)
+    for (const session of sessions.value) recomputeSessionDerived(session)
     activeSessionId.value = snapshotState.activeSessionId
     selectedPointId.value = activeSession.value.points[0]?.id ?? null
     selectedStageIndex.value = 0
@@ -194,16 +229,49 @@ export const useFiringStore = defineStore('firing-studio', () => {
     persist()
   }
 
-  function importSamples(samples: FiringSample[]) {
+  /**
+   * 导入一段 CSV 记录。失败时保留原账、不改任何数据，并记住文件以便重试。
+   * 成功则新增一段（不替换整批），合并后校订优先、缺口保留。
+   */
+  function importCsvSegment(
+    filename: string,
+    content: string,
+  ): { ok: boolean; error?: string; warning?: string } {
+    const session = activeSession.value
+    const parsed = parseTemperatureCsv(content)
+    if (!parsed.samples.length) {
+      lastFailedImport.value = { filename, content }
+      return {
+        ok: false,
+        error: '未解析到有效记录：请确认 CSV 含 time,temp（或 时间,温度）列，且数值为有效数字。原账未改动，可重试。',
+      }
+    }
     recordHistory()
-    activeSession.value.actualSamples = samples
-    activeSession.value.status = 'review'
+    const segment = createSegmentFromImport(session.id, filename, parsed.samples)
+    session.segments = [...(session.segments ?? []), segment]
+    recomputeSessionDerived(session)
+    session.status = 'review'
+    lastFailedImport.value = null
+    sessions.value = [...sessions.value]
     persist()
+    const warning = parsed.skippedCount > 0 ? `有 ${parsed.skippedCount} 行因时间或温度无效被跳过。` : undefined
+    return { ok: true, warning }
+  }
+
+  /** 重试上次失败的导入 */
+  function retryLastImport(): { ok: boolean; error?: string; warning?: string } {
+    const last = lastFailedImport.value
+    if (!last) return { ok: false, error: '没有可重试的导入。' }
+    return importCsvSegment(last.filename, last.content)
   }
 
   function clearActualSamples() {
     recordHistory()
-    activeSession.value.actualSamples = []
+    const session = activeSession.value
+    session.actualSamples = []
+    session.segments = []
+    session.corrections = []
+    sessions.value = [...sessions.value]
     persist()
   }
 
@@ -218,6 +286,34 @@ export const useFiringStore = defineStore('firing-studio', () => {
     persist()
   }
 
+  /** 新增一条人工校订点，重叠处优先于分段采样 */
+  function addCorrection(timeMin: number, tempC: number, note?: string) {
+    recordHistory()
+    const session = activeSession.value
+    session.corrections = [...(session.corrections ?? []), createCorrection(session.id, timeMin, tempC, note)]
+    recomputeSessionDerived(session)
+    sessions.value = [...sessions.value]
+    persist()
+  }
+
+  function removeCorrection(id: string) {
+    recordHistory()
+    const session = activeSession.value
+    session.corrections = (session.corrections ?? []).filter((item) => item.id !== id)
+    recomputeSessionDerived(session)
+    sessions.value = [...sessions.value]
+    persist()
+  }
+
+  function removeSegment(id: string) {
+    recordHistory()
+    const session = activeSession.value
+    session.segments = (session.segments ?? []).filter((item) => item.id !== id)
+    recomputeSessionDerived(session)
+    sessions.value = [...sessions.value]
+    persist()
+  }
+
   function addSession() {
     recordHistory()
     const source = activeSession.value
@@ -228,6 +324,8 @@ export const useFiringStore = defineStore('firing-studio', () => {
       firedAt: new Date().toLocaleString('zh-CN', { hour12: false }),
       status: 'draft',
       actualSamples: [],
+      segments: [],
+      corrections: [],
       points: source.points.map((point, index) => ({
         ...point,
         id: `point-new-${Date.now()}-${index}`,
@@ -258,11 +356,18 @@ export const useFiringStore = defineStore('firing-studio', () => {
   }
 
   function exportSessionJson() {
+    const account = activeAccount.value
     const payload = {
       schema: 'kiln-firing-curve/v1',
       exportedAt: new Date().toISOString(),
       session: activeSession.value,
-      validation: validationIssues.value,
+      ledger: {
+        sources: account.sources,
+        gaps: account.gaps,
+        correctionCount: account.correctionCount,
+        deviation: account.deviation,
+        issues: account.issues,
+      },
       timeAlignment: {
         offsetMin: activeSession.value.timeOffsetMin,
         basis: 'actual elapsed time + offset vs target arrival time',
@@ -272,7 +377,7 @@ export const useFiringStore = defineStore('firing-studio', () => {
     const url = URL.createObjectURL(blob)
     const anchor = document.createElement('a')
     anchor.href = url
-    anchor.download = `${activeSession.value.name}-烧成数据.json`
+    anchor.download = `${activeSession.value.name}-烧成账.json`
     anchor.click()
     URL.revokeObjectURL(url)
   }
@@ -286,9 +391,11 @@ export const useFiringStore = defineStore('firing-studio', () => {
     selectedStageIndex,
     overlaySessionIds,
     visibleSessions,
-    validationIssues,
     canUndo,
     canRedo,
+    accountBySession,
+    activeAccount,
+    lastFailedImport,
     undo,
     redo,
     beginDrag,
@@ -299,10 +406,14 @@ export const useFiringStore = defineStore('firing-studio', () => {
     removePoint,
     applyTemplate,
     saveTemplateFromSession,
-    importSamples,
+    importCsvSegment,
+    retryLastImport,
     clearActualSamples,
     setTimeOffset,
     updateSessionMeta,
+    addCorrection,
+    removeCorrection,
+    removeSegment,
     addSession,
     removeSession,
     toggleOverlay,

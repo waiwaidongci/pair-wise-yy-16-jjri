@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import type { FiringPoint, FiringSample, KilnSession } from '../types/firing'
+import type { DataGap, FiringPoint, FiringSample, KilnSession } from '../types/firing'
 import { sessionDomain, sortPoints } from '../utils/curve'
 
 const props = withDefaults(
@@ -10,11 +10,13 @@ const props = withDefaults(
     selectedPointId?: string | null
     interactive?: boolean
     showActual?: boolean
+    gaps?: DataGap[]
   }>(),
   {
     selectedPointId: null,
     interactive: true,
     showActual: true,
+    gaps: () => [],
   },
 )
 
@@ -35,6 +37,11 @@ const plotHeight = height - padding.top - padding.bottom
 const domain = computed(() => sessionDomain(props.sessions))
 const activeSession = computed(
   () => props.sessions.find((session) => session.id === props.activeSessionId) ?? props.sessions[0],
+)
+const activeCorrections = computed(() =>
+  (activeSession.value?.actualSamples ?? []).filter(
+    (sample) => (sample as { source?: string }).source === 'correction',
+  ),
 )
 
 function xScale(timeMin: number) {
@@ -123,6 +130,19 @@ function sessionColor(index: number) {
       </defs>
       <rect :x="padding.left" :y="padding.top" :width="plotWidth" :height="plotHeight" fill="url(#heatZone)" rx="5" />
 
+      <g v-if="gaps.length" class="gap-bands">
+        <rect
+          v-for="gap in gaps"
+          :key="gap.id"
+          :x="xScale(gap.fromMin)"
+          :y="padding.top"
+          :width="Math.max(2, xScale(gap.toMin) - xScale(gap.fromMin))"
+          :height="plotHeight"
+          fill="#f4d7a8"
+          opacity=".55"
+        />
+      </g>
+
       <g class="grid-lines">
         <g v-for="tick in tempTicks" :key="`temp-${tick}`">
           <line :x1="padding.left" :x2="width - padding.right" :y1="yScale(tick)" :y2="yScale(tick)" />
@@ -159,6 +179,19 @@ function sessionColor(index: number) {
           :opacity="session.id === activeSessionId ? .9 : .25"
           class="actual-curve"
         />
+        <g v-if="showActual && session.id === activeSessionId" class="correction-layer">
+          <rect
+            v-for="sample in activeCorrections"
+            :key="`corr-${sample.id}`"
+            :x="xScale(sample.timeMin) - 4"
+            :y="yScale(sample.tempC) - 4"
+            width="8"
+            height="8"
+            fill="#2e6f76"
+            stroke="#fff"
+            stroke-width="1.5"
+          />
+        </g>
         <path
           v-if="session.id === activeSessionId"
           :d="path(session.points)"
@@ -196,6 +229,8 @@ function sessionColor(index: number) {
     <div class="chart-legend">
       <span><i class="legend-target" />目标曲线</span>
       <span><i class="legend-actual" />实际记录</span>
+      <span><i class="legend-correction" />人工校订</span>
+      <span><i class="legend-gap" />缺口</span>
       <span><i class="legend-overlay" />叠加窑次</span>
       <span class="chart-hint">拖动圆点调整温度与到达时间</span>
     </div>
@@ -225,6 +260,8 @@ svg { display: block; width: 100%; height: auto; overflow: visible; touch-action
 .chart-legend i { display: inline-block; width: 24px; height: 3px; border-radius: 2px; }
 .legend-target { background: #b6532f; }
 .legend-actual { background: repeating-linear-gradient(90deg, #2e6f76 0 6px, transparent 6px 10px); }
+.legend-correction { display: inline-block; width: 9px; height: 9px; background: #2e6f76; border-radius: 2px; }
+.legend-gap { background: #f4d7a8; }
 .legend-overlay { background: #447f8a; opacity: .5; }
 .chart-hint { margin-left: auto; }
 </style>

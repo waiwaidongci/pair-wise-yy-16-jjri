@@ -10,20 +10,16 @@ import CurveChart from '../components/CurveChart.vue'
 import StagePanel from '../components/StagePanel.vue'
 import RiskSummary from '../components/RiskSummary.vue'
 import DeviationPanel from '../components/DeviationPanel.vue'
-import { buildStages, calculateDeviation } from '../utils/curve'
+import { buildStages } from '../utils/curve'
 
 const store = useFiringStore()
-const { activeSession, selectedPointId, selectedStageIndex, validationIssues, canUndo, canRedo } = storeToRefs(store)
+const { activeSession, selectedPointId, selectedStageIndex, canUndo, canRedo, activeAccount } = storeToRefs(store)
 const templateOpen = ref(false)
 const templateName = ref('')
 const stages = computed(() => buildStages(activeSession.value.points))
-const deviation = computed(() =>
-  calculateDeviation(
-    activeSession.value.points,
-    activeSession.value.actualSamples,
-    activeSession.value.timeOffsetMin,
-  ),
-)
+const deviation = computed(() => activeAccount.value.deviation)
+const validationIssues = computed(() => activeAccount.value.issues)
+const gaps = computed(() => activeAccount.value.gaps)
 const sessionOptions = computed(() =>
   store.sessions.map((session) => ({ label: session.name, value: session.id })),
 )
@@ -87,6 +83,7 @@ function saveTemplate() {
           :sessions="[activeSession]"
           :active-session-id="activeSession.id"
           :selected-point-id="selectedPointId"
+          :gaps="gaps"
           @select-point="selectedPointId = $event"
           @update-point="(id, time, temp) => store.updatePoint(id, time, temp, false)"
           @begin-drag="store.beginDrag"

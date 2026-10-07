@@ -1,12 +1,12 @@
-import type { FiringSample } from '../types/firing'
+import type { CsvParseResult, FiringSample } from '../types/firing'
 
-export function parseTemperatureCsv(content: string) {
+export function parseTemperatureCsv(content: string): CsvParseResult {
   const lines = content
-    .replace(/^\uFEFF/, '')
+    .replace(/^﻿/, '')
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
-  if (lines.length < 2) return [] as FiringSample[]
+  if (lines.length < 2) return { samples: [], skippedCount: 0 }
   const headers = lines[0].split(',').map((value) => value.trim().toLowerCase())
   const timeIndex = headers.findIndex((header) =>
     ['time', 'minute', 'minutes', '时间', '分钟', '经过时间'].includes(header),
@@ -16,13 +16,17 @@ export function parseTemperatureCsv(content: string) {
   )
   const actualTimeIndex = timeIndex >= 0 ? timeIndex : 0
   const actualTempIndex = tempIndex >= 0 ? tempIndex : 1
-  return lines.slice(1).flatMap((line, index) => {
+  let skippedCount = 0
+  const samples = lines.slice(1).flatMap((line, index) => {
     const values = line.split(',')
     const rawTime = values[actualTimeIndex]?.trim() ?? ''
     const rawTemp = values[actualTempIndex]?.trim() ?? ''
     const timeValue = Number(rawTime)
     const tempValue = Number(rawTemp)
-    if (Number.isNaN(timeValue) || Number.isNaN(tempValue)) return []
+    if (Number.isNaN(timeValue) || Number.isNaN(tempValue)) {
+      skippedCount += 1
+      return []
+    }
     const isTimecode = rawTime.includes(':')
     const timeMin = isTimecode
       ? rawTime.split(':').reduce((total, value) => total * 60 + Number(value), 0) / 60
@@ -35,6 +39,7 @@ export function parseTemperatureCsv(content: string) {
       },
     ]
   })
+  return { samples, skippedCount }
 }
 
 export function downloadText(content: string, filename: string, type: string) {
